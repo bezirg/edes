@@ -222,17 +222,17 @@ loop(Parent, Name, State, Mod, Timeout, Debug) ->
     end.
 
 wait_queues() ->
-    receive
-        %% {add_link, From} -> put(queues, sets:add_element(From, get(queues))),
-        %%                     put(From, queue:new());
-        {remove_link, From} -> put(queues, sets:del_element(From, get(queues))),
-                               %% move to local
-                               put(local, get(local) ++ queue:to_list(get(From))),
-                               erase(From);
-        {schedule, From, Event, Time} ->  put(From, queue:in({Time, Event}, get(From)))
-    end,
     case lists:any(fun (Q) -> queue:is_empty(get(Q)) end, sets:to_list(get(queues))) of % can be optimized with a sets:fold
-        true -> wait_queues();
+        true -> receive
+                    %% {add_link, From} -> put(queues, sets:add_element(From, get(queues))),
+                    %%                     put(From, queue:new());
+                    {remove_link, From} -> put(queues, sets:del_element(From, get(queues))),
+                                           %% move to local
+                                           put(local, get(local) ++ queue:to_list(get(From))),
+                                           erase(From);
+                    {schedule, From, Event, Time} ->  put(From, queue:in({Time, Event}, get(From)))
+                end,
+                wait_queues();
         false -> ok
     end.
         
@@ -247,8 +247,10 @@ remove_smallest_timestamp() ->
                                end,
     case RemoteEvent < LocalEvent of
         true -> put(Queue, queue:drop(get(Queue))),
+                 io:format("~p Local: ~p  , Remote ~p", [get(name), LocalEvent, RemoteEvent]),
                 RemoteEvent;
         false -> put(local, Rest_local),
+                 io:format("~p Local: ~p  , Remote ~p", [get(name), LocalEvent, RemoteEvent]),
                  LocalEvent
     end.
 

@@ -121,6 +121,7 @@ init_it(Starter, Parent, Name0, Mod, Args, Options) ->
     put(queues, sets:new()),
     put(local,[]),
     put(lookahead, []),
+    put(last_null, 0),
     case catch Mod:init(Args) of
 	{ok, State} ->
 	    proc_lib:init_ack(Starter, {ok, self()}),
@@ -199,15 +200,23 @@ loop(Parent, Name, State, Mod, Timeout, Debug) ->
                 true -> put(clock, Timeout),
                         terminate(timeout, Name, [], Mod, State, Debug);
                 false -> put(clock, Next_clock),
-                         send_neighbours(Next_clock),
+                         %% null message optimization, implies static lookahead
+                         case get(last_null) < Next_clock of
+                             true -> % a brand new null message
+                                 send_neighbours(Next_clock),
+                                 put(last_null, Next_clock);
+                             false -> 
+                                 ok % such a null message has already been sent
+                         end,
                          case Event == null of
                              true -> % is a null message
-                                     loop(Parent, Name, State, Mod, Timeout, Debug);
-                             false -> Res = Mod:handle_event(Event, State),
-                                      case Debug =:= [] of
-                                          true -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout);
-                                          false -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout, Debug)
-                                      end
+                                 loop(Parent, Name, State, Mod, Timeout, Debug);
+                             false -> 
+                                 Res = Mod:handle_event(Event, State),
+                                 case Debug =:= [] of
+                                     true -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout);
+                                     false -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout, Debug)
+                                 end
                          end
             end
     end.
@@ -238,10 +247,8 @@ remove_smallest_timestamp() ->
                                end,
     case RemoteEvent < LocalEvent of
         true -> put(Queue, queue:drop(get(Queue))),
-                 io:format("~p Local: ~p  , Remote ~p", [get(name), LocalEvent, RemoteEvent]),
                 RemoteEvent;
         false -> put(local, Rest_local),
-                 io:format("~p Local: ~p  , Remote ~p", [get(name), LocalEvent, RemoteEvent]),
                  LocalEvent
     end.
 

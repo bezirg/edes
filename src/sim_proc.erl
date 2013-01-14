@@ -121,7 +121,6 @@ init_it(Starter, Parent, Name0, Mod, Args, Options) ->
     put(queues, sets:new()),
     put(local,[]),
     put(lookahead, []),
-    put(last_null, 0),
     case catch Mod:init(Args) of
 	{ok, State} ->
 	    proc_lib:init_ack(Starter, {ok, self()}),
@@ -194,29 +193,21 @@ loop(Parent, Name, State, Mod, Timeout, Debug) ->
     Next_clock = EventTime,
     Clock = get(clock),
     case Next_clock < Clock of
-        true -> exit({engine_error, Next_clock, queue:to_list(get(hd(sets:to_list(get(queues)))))});
+        true -> error({engine_error, Next_clock, queue:to_list(get(hd(sets:to_list(get(queues)))))});
         false ->
             case Next_clock > Timeout of
                 true -> put(clock, Timeout),
                         terminate(timeout, Name, [], Mod, State, Debug);
                 false -> put(clock, Next_clock),
-                         %% null message optimization, implies static lookahead
-                         case get(last_null) < Next_clock of
-                             true -> % a brand new null message
-                                 send_neighbours(Next_clock),
-                                 put(last_null, Next_clock);
-                             false -> 
-                                 ok % such a null message has already been sent
-                         end,
+                         send_neighbours(Next_clock),
                          case Event == null of
                              true -> % is a null message
-                                 loop(Parent, Name, State, Mod, Timeout, Debug);
-                             false -> 
-                                 Res = Mod:handle_event(Event, State),
-                                 case Debug =:= [] of
-                                     true -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout);
-                                     false -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout, Debug)
-                                 end
+                                     loop(Parent, Name, State, Mod, Timeout, Debug);
+                             false -> Res = Mod:handle_event(Event, State),
+                                      case Debug =:= [] of
+                                          true -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout);
+                                          false -> handle_res(Res, Next_clock, Parent, Name, State, Mod, Timeout, Debug)
+                                      end
                          end
             end
     end.
@@ -247,10 +238,8 @@ remove_smallest_timestamp() ->
                                end,
     case RemoteEvent < LocalEvent of
         true -> put(Queue, queue:drop(get(Queue))),
-                 io:format("~p Local: ~p  , Remote ~p", [get(name), LocalEvent, RemoteEvent]),
                 RemoteEvent;
         false -> put(local, Rest_local),
-                 io:format("~p Local: ~p  , Remote ~p", [get(name), LocalEvent, RemoteEvent]),
                  LocalEvent
     end.
 
@@ -286,11 +275,23 @@ handle_res(Res, Clock, Parent, Name, State, Mod, Timeout, Debug) ->
 
 send_neighbours(Clock) ->
     %% schedules null messages to the LPs with the lookahead
-    lists:foreach(fun ({LP, Lookahead}) -> LP ! {schedule, get(name), null, Clock + Lookahead} end, get(lookahead)),
-    case get(debug) of
-        [] -> ok;
-        Debug -> sys:handle_debug(Debug, fun print_event/3, get(name), {null, Clock})
-    end.
+    Lookahead_ = lists:map(fun ({LP, Lookahead, LastMessage}) -> 
+                                   {LP, 
+                                    Lookahead, 
+                                    case Clock + Lookahead > LastMessage of
+                                        true ->           % then send the null message and update the last message sent
+                                            %% if debug enabled
+                                            case get(debug) of
+                                                [] -> ok;
+                                                Debug -> sys:handle_debug(Debug, fun print_event/3, get(name), {null, Clock})
+                                            end,
+                                            LP ! {schedule, get(name), null, Clock + Lookahead},
+                                            Clock + Lookahead;
+                                        false -> LastMessage % else don't send null message and don't update the last message
+                                    end
+                                   }
+                           end, get(lookahead)),
+    put(lookahead, Lookahead_).                 % update the process dictionary
 
 
                           
@@ -333,7 +334,7 @@ print_event(Dev, {out, Msg, To, State}, Name) ->
 print_event(Dev, {ok, State}, Name) ->
     io:format(Dev, "*DBG* ~p new state ~w~n", [Name, State]);
 print_event(Dev, {schedule, Event, Time}, Name) ->
-    io:format(Dev, "*DBG* ~p scheduled ~w in ~p ~n", [Name, Event, Time]);
+    io:format(Dev, "*DBG* ~p scheduled ~w on ~p ~n", [Name, Event, Time]);
 print_event(Dev, {null, Clock}, Name ) ->
     io:format(Dev, "*DBG* ~p@~p null ~n", [Clock, Name]);
 print_event(Dev, {unschedule, Event}, Name) ->
@@ -531,23 +532,37 @@ format_status(Opt, StatusData) ->
 %% API
 
 schedule(Event, Time) ->
+    ScheduledTime = Time + get(clock),
     Event_list = get(local),
-    put(local, [{Time + get(clock), Event} | Event_list]),
+    put(local, [{ScheduledTime, Event} | Event_list]),
     case get(debug) of
         [] -> ok;
-        Debug -> sys:handle_debug(Debug, fun print_event/3, get(name), {schedule, Event, Time})
+        Debug -> sys:handle_debug(Debug, fun print_event/3, get(name), {schedule, Event, ScheduledTime})
     end,
     ok.            
 
 schedule(LP, Event, Time) ->
-    LP ! {schedule, get(name), Event, Time + get(clock)},
+    ScheduledTime = Time + get(clock),
+    Lookahead = get(lookahead),
+    case lists:keyfind(LP, 1, Lookahead) of
+        {LP, LP_Lookahead, LastMessage} -> case ScheduledTime < LastMessage of
+                                            true -> error(message_out_of_sequence);
+                                            false -> % send the event to schedule
+                                                   LP ! {schedule, get(name), Event, ScheduledTime}, 
+                                                   case ScheduledTime > LastMessage of
+                                                       true ->
+                                                           %% update the last message 
+                                                           put(lookahead, lists:keyreplace(LP, 1, Lookahead, {LP, LP_Lookahead, ScheduledTime}));
+                                                       false -> ok
+                                                   end
+                                           end;
+        false -> error(link_not_created)
+    end,
     case get(debug) of
         [] -> ok;
-        Debug -> sys:handle_debug(Debug, fun print_event/3, LP, {schedule, Event, Time})
+        Debug -> sys:handle_debug(Debug, fun print_event/3, LP, {schedule, Event, ScheduledTime})
     end,
     ok.
-
-
 
 %% unschedule(Event) ->
 %%     Event_list = get(local),
@@ -600,11 +615,12 @@ remove_link(LP) ->
 remove_links() ->
     %% removes the links of this LP
     Lookahead = get(lookahead),
-    lists:foreach(fun ({LP, _}) -> remove_link(LP) end, Lookahead). % can be optimized by code inlining
+    lists:foreach(fun ({LP,_,_}) -> remove_link(LP) end, Lookahead). % can be optimized by code inlining
                          
 link_to(LP, Val) ->
     %% set lookahead for that link to 0
     Lookahead = get(lookahead),
-    Lookahead_ = lists:keystore(LP, 1, Lookahead, {LP, Val}),
+    % stores a triple {LogicalProcess, LookaheadValue, LastMessageTime} in the association list get(lookahead)
+    Lookahead_ = lists:keystore(LP, 1, Lookahead, {LP, Val, -1}), 
     put(lookahead, Lookahead_).    
 

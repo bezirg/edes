@@ -1,0 +1,9 @@
+{application, sim_example,
+              [  {description, "Erlang simulation framework"},
+                 {vsn, "0.0.1"},
+                 {modules, [abd, lax, ord, sim_controller]}, % introduced modules
+                 {applications, [kernel, stdlib, sim_engine]},       % dependencies
+                 {registered, [abd, lax, ord]},
+                 {env, []},                              % application's environmental variables
+                 {mod, {sim_example_app, []}}
+              ]}.                    

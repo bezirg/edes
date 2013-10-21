@@ -1,1 +1,5 @@
-
+sim_example/deps
+sim_example/rel
+sim_example/doc
+sim_example/ebin
+**/TAGS

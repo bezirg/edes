@@ -1,0 +1,8 @@
+{application, sim_engine,
+              [  {description, "Erlang simulation framework"},
+                 {vsn, "0.0.1"},
+                 {modules, [sim_cont, sim_proc, sim_engine_app]}, % introduced modules
+                 {applications, [kernel, stdlib]},       % dependencies
+                 {env, []},                              % application's environmental variables
+                 {mod, {sim_engine_app, []}}
+              ]}.                    
